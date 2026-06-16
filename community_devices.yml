@@ -1,0 +1,12 @@
+# Xiaomi Pad 6 (pipa)
+xiaomi_pipa:
+  type: rootfs
+  arch: arm64
+  edition: phosh
+  variant: phone
+  apilevel: 30
+  use_internal_repository: false
+
+  packages:
+    - adaptation-droidian-pipa
+    - adaptation-pipa-configs
