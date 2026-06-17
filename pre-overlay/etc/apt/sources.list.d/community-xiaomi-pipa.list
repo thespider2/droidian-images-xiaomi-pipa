@@ -1,5 +1,2 @@
 # Community repository for Xiaomi Pad 6 (pipa)
-#
-# Uncomment and update once your repository is ready:
-#
-# deb [signed-by=/usr/share/keyrings/xiaomi-pipa.gpg] https://YOUR_REPO_URL bookworm main
+deb [signed-by=/usr/share/keyrings/droidian-pipa.gpg] https://droidian-pipa-repo-dc12c3.gitlab.io stable main
