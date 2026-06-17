@@ -1,2 +1,3 @@
 # Community repository for Xiaomi Pad 6 (pipa)
-deb [signed-by=/usr/share/keyrings/droidian-pipa.gpg] https://droidian-pipa-repo-dc12c3.gitlab.io stable main
+# Temporarily disabled — GitLab Pages repo not ready yet
+# deb [signed-by=/usr/share/keyrings/droidian-pipa.gpg] https://droidian-pipa-repo-dc12c3.gitlab.io stable main
