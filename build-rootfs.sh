@@ -11,10 +11,17 @@ DROIDIAN_VERSION="next"
 IMAGES_DIR="${PWD}/images"
 mkdir -p "${IMAGES_DIR}"
 
+echo "I: Setting up qemu-user-static for cross-arch emulation..."
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
 echo "I: Pulling rootfs-builder image..."
 docker pull "quay.io/droidian/rootfs-builder:${DROIDIAN_VERSION}-amd64"
 
 echo "I: Building rootfs for ${PRODUCT}..."
+echo "I: Make sure your apt repo is set up and accessible,"
+echo "I: and pre-overlay has the correct sources.list + GPG key."
+echo ""
+
 docker run --privileged \
     -v "${IMAGES_DIR}:/buildd/out" \
     -v /dev:/host-dev \
@@ -28,5 +35,6 @@ docker run --privileged \
         ./generate_device_recipe.py ${PRODUCT} ${ARCH} ${EDITION} ${VARIANT} ${APILEVEL} && \
         debos --disable-fakemachine generated/droidian.yaml"
 
+echo ""
 echo "I: Rootfs image built at ${IMAGES_DIR}/"
 ls -lh "${IMAGES_DIR}/"
