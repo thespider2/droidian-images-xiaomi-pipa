@@ -1,6 +1,6 @@
 # Xiaomi Pad 6 (pipa)
 xiaomi_pipa:
-  type: rootfs
+  type: image
   arch: arm64
   edition: phosh
   variant: phone
