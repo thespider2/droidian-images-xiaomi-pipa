@@ -16,9 +16,9 @@ Architecture: arm64
 Maintainer: Ayman RGAB <aymanrgab@gmail.com>
 Installed-Size: 41
 Filename: adaptation-pipa-configs_0.6+git20260617203559.d3507b8.droidian_arm64.deb
-Size: 6448
-MD5sum: 86ec310d169bbd3a6d5589abbc04eca0
-SHA256: 467d415d2d8ad9474d0cc7ca486cf85f66d41a0f05ce0f1e123540a929b3fe59
+Size: 6416
+MD5sum: 4194ae93d99e4fe4d3bcefaf00768e1a
+SHA256: 5296a726ccca70a8d40c20a6694858f11776e8829573579bf98e4b812d63976f
 Description: Droidian adaptation for Xiaomi Pad 6 (pipa) - configuration files
 
 Package: linux-bootimage-4.19-325-xiaomi-pipa
