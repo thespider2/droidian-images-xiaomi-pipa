@@ -1,2 +1,0 @@
-# Temporary local apt repo until GitLab Pages is fixed
-deb [trusted=yes] file:/var/local-apt-repo ./

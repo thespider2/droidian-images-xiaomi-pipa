@@ -13,3 +13,6 @@ xiaomi_pipa:
     - linux-image-4.19-325-xiaomi-pipa
     - linux-bootimage-4.19-325-xiaomi-pipa
     - linux-headers-4.19-325-xiaomi-pipa
+    - linux-image-xiaomi-pipa
+    - linux-bootimage-xiaomi-pipa
+    - linux-headers-xiaomi-pipa
