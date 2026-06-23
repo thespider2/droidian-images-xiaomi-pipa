@@ -100,6 +100,14 @@ TEMPLATE_IMAGE_ADAPTATION = """
       packages: %(packages)s
 """
 
+TEMPLATE_INCLUDE_PARTITIONS = """
+  - action: run
+    chroot: false
+    description: Include partition images
+    command: |
+      ../scripts/include-partitions.sh "{{ $image }}" ../android-partitions
+"""
+
 def get_matrix(contents):
 	"""
 	Returns a JSON containing all the possible jobs.
@@ -205,6 +213,7 @@ def generate_recipe_for_product(contents, product, arch, edition, variant, apile
 	with open(os.path.join(BUILDER_GENERATED_DIRECTORY, "droidian.yaml"), "w") as f:
 		f.write(TEMPLATE % template_config)
 		f.write(TEMPLATE_ENTRYPOINT)
+		f.write(TEMPLATE_INCLUDE_PARTITIONS)
 
 def prompt_product(contents):
 	"""
