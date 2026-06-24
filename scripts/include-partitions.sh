@@ -52,9 +52,10 @@ echo "Building fastboot zip with partition images"
 
 FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
 TMPDIR=$(mktemp -d)
+mkdir -p "${TMPDIR}/userdata"
 
 for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${TMPDIR}/"
+    cp "${PART_DIR}/${img}" "${TMPDIR}/userdata/"
 done
 
 cat > "${TMPDIR}/flash-partitions.sh" << 'SCRIPT'
@@ -64,10 +65,10 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Flashing vendor partition..."
-fastboot flash vendor "${DIR}/vendor.img" || echo "vendor partition may not exist"
+fastboot flash vendor "${DIR}/userdata/vendor.img" || echo "vendor partition may not exist"
 
 echo "Flashing odm partition..."
-fastboot flash odm "${DIR}/odm.img" || echo "odm partition may not exist"
+fastboot flash odm "${DIR}/userdata/odm.img" || echo "odm partition may not exist"
 
 echo "Rebooting..."
 fastboot reboot || true
