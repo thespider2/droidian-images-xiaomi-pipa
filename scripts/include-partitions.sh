@@ -122,28 +122,19 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
 
     VENDOR_SIZE=$(stat -c%s "${WORKDIR}/vendor.img" 2>/dev/null || echo 0)
     ODM_SIZE=$(stat -c%s "${WORKDIR}/odm.img" 2>/dev/null || echo 0)
-    EXTRA_NEEDED=$((VENDOR_SIZE + ODM_SIZE + 50*1024*1024))  # +50MB margin
+    EXTRA_NEEDED=$((VENDOR_SIZE + ODM_SIZE + 100*1024*1024))  # +100MB margin
 
     if [ "${EXTRA_NEEDED}" -le 0 ]; then
         echo "  No partition images to inject, skipping fastboot zip update"
-        rm -f "${WORKDIR}/userdata.raw"
-        img2simg "${WORKDIR}/data/userdata.img" "${WORKDIR}/data/userdata.img" 2>/dev/null || true
     else
         echo "  Extra space needed: $((EXTRA_NEEDED / 1024 / 1024)) MB"
 
-        DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-
-        # Detach loop before truncating, then re-attach so it sees the new size
-        losetup -d "${DEVICE}"
-        truncate -s "+${EXTRA_NEEDED}" "${WORKDIR}/userdata.raw"
-        DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-
-        pvresize "${DEVICE}"
-
+        # Mount old rootfs and tar it up
+        OLD_DEV=$(losetup -f --show "${WORKDIR}/userdata.raw")
         vgchange -ay droidian 2>/dev/null || true
         sleep 3
 
-        # Find the LV path (handle both naming conventions)
+        # Find LV path
         LV_PATH=""
         for p in /dev/mapper/droidian-droidian--rootfs /dev/droidian/droidian-rootfs; do
             [ -e "${p}" ] && LV_PATH="${p}" && break
@@ -155,69 +146,80 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
             done
         fi
 
-        # Extend LV and filesystem to fit vendor/odm
-        LV_EXTENDED=false
-        if [ -n "${LV_PATH}" ] && [ "${EXTRA_NEEDED}" -gt 0 ]; then
-            if lvextend -L "+${EXTRA_NEEDED}" "${LV_PATH}" 2>/dev/null; then
-                LV_EXTENDED=true
-                resize2fs "${LV_PATH}" 2>/dev/null || true
-            else
-                echo "  WARNING: lvextend failed, not enough free space"
+        OLD_SIZE=$(stat -c%s "${WORKDIR}/userdata.raw")
+        NEW_SIZE=$((OLD_SIZE + EXTRA_NEEDED))
+
+        if [ -n "${LV_PATH}" ]; then
+            ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
+            MOUNT_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
+            [ ! -e "${MOUNT_PATH}" ] && MOUNT_PATH="${LV_PATH/\/dev/\/host-dev}"
+
+            mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt" 2>/dev/null || true
+            if mountpoint -q "${WORKDIR}/mnt"; then
+                echo "  Backing up rootfs contents"
+                tar cf "${WORKDIR}/rootfs.tar" -C "${WORKDIR}/mnt" --one-file-system . 2>/dev/null
+                umount "${WORKDIR}/mnt"
             fi
         fi
+        vgchange -an droidian 2>/dev/null || true
+        losetup -d "${OLD_DEV}"
 
-        # Resolve /host-dev path for mounting
-        ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
-        MOUNT_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
-        if [ ! -e "${MOUNT_PATH}" ] && [ -n "${LV_PATH}" ]; then
-            MOUNT_PATH="${LV_PATH/\/dev/\/host-dev}"
-        fi
+        # Build a fresh larger image with same LVM layout
+        echo "  Building new image (${NEW_SIZE} bytes)"
+        truncate -s "${NEW_SIZE}" "${WORKDIR}/userdata-new.raw"
+        NEW_DEV=$(losetup -f --show "${WORKDIR}/userdata-new.raw")
+        pvcreate "${NEW_DEV}"
+        vgcreate droidian "${NEW_DEV}"
+        lvcreate --zero n -L 128M -n droidian-persistent droidian
+        lvcreate --zero n -L 32M -n droidian-reserved droidian
+        lvcreate --zero n -l 100%FREE -n droidian-rootfs droidian
+        vgchange -ay droidian 2>/dev/null || true
+        sleep 3
 
-        mkdir -p "${WORKDIR}/mnt"
-        mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt"
-
-        if [ "${LV_EXTENDED}" = false ]; then
-            # Check available space before attempting copy
-            AVAIL=$(df --output=avail "${WORKDIR}/mnt" 2>/dev/null | tail -1 || echo 0)
-            NEED=$(( (VENDOR_SIZE + ODM_SIZE) / 1024 ))
-            if [ "${AVAIL}" -lt "${NEED}" ]; then
-                echo "  WARNING: not enough space (${AVAIL}KB available, ${NEED}KB needed), skipping copy"
-                umount "${WORKDIR}/mnt" 2>/dev/null || true
-            fi
-        fi
-        mkdir -p "${WORKDIR}/mnt/userdata"
-        for img in vendor.img odm.img; do
-            [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
+        # Find the new LV path
+        LV_PATH=""
+        for p in /dev/mapper/droidian-droidian--rootfs /dev/droidian/droidian-rootfs; do
+            [ -e "${p}" ] && LV_PATH="${p}" && break
         done
-        sync
+        if [ -z "${LV_PATH}" ]; then
+            vgscan --mknodes -v 2>/dev/null || true; sleep 3
+            for p in /dev/mapper/droidian-droidian--rootfs /dev/droidian/droidian-rootfs; do
+                [ -e "${p}" ] && LV_PATH="${p}" && break
+            done
+        fi
 
-        umount "${WORKDIR}/mnt"
+        if [ -n "${LV_PATH}" ]; then
+            ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
+            MOUNT_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
+            [ ! -e "${MOUNT_PATH}" ] && MOUNT_PATH="${LV_PATH/\/dev/\/host-dev}"
 
-        # Shrink FS to minimum, then match LV and PV
-        if [ -e "${LV_PATH}" ]; then
-            e2fsck -fy "${LV_PATH}" 2>/dev/null || true
-            resize2fs -M "${LV_PATH}" 2>/dev/null || true
-            BLOCK_COUNT=$(dumpe2fs -h "${LV_PATH}" 2>/dev/null | awk '/Block count:/{print $3}')
-            BLOCK_SIZE=$(dumpe2fs -h "${LV_PATH}" 2>/dev/null | awk '/Block size:/{print $3}')
-            if [ -n "${BLOCK_COUNT}" ] && [ -n "${BLOCK_SIZE}" ]; then
-                MIN_LV_BYTES=$((BLOCK_COUNT * BLOCK_SIZE + 50*1024*1024))
-                lvreduce -f -L "${MIN_LV_BYTES}B" "${LV_PATH}" 2>/dev/null || true
+            mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file "${LV_PATH}" 2>/dev/null || \
+                mkfs.ext4 "${LV_PATH}"
+            mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt"
+
+            if [ -f "${WORKDIR}/rootfs.tar" ]; then
+                echo "  Restoring rootfs contents"
+                tar xf "${WORKDIR}/rootfs.tar" -C "${WORKDIR}/mnt"
             fi
+
+            echo "  Adding vendor/odm images to /userdata/"
+            mkdir -p "${WORKDIR}/mnt/userdata"
+            for img in vendor.img odm.img; do
+                [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
+            done
+            sync
+
+            # Create stamp file (required by Droidian)
+            mkdir -p "${WORKDIR}/mnt/var/lib/halium"
+            touch "${WORKDIR}/mnt/var/lib/halium/requires-lvm-resize"
+
+            umount "${WORKDIR}/mnt"
         fi
 
         vgchange -an droidian 2>/dev/null || true
-
-        # Shrink the raw image to minimal size using allocated PE count
-        ALLOC_PES=$(pvs --noheadings -o pv_pe_alloc_count "${DEVICE}" 2>/dev/null | tr -d ' ')
-        PE_SIZE=$(pvs --noheadings -o pe_size --units b "${DEVICE}" 2>/dev/null | awk '{print $1}' | tr -d ' B')
-        if [ -n "${ALLOC_PES}" ] && [ -n "${PE_SIZE}" ] && [ "${ALLOC_PES}" -gt 0 ]; then
-            # Add 1 PE of slack and 1 PE for LVM metadata headers
-            TARGET_PV_BYTES=$(( (ALLOC_PES + 2) * PE_SIZE ))
-            pvresize --setphysicalvolumesize "${TARGET_PV_BYTES}B" "${DEVICE}" 2>/dev/null || true
-            truncate -s "${TARGET_PV_BYTES}" "${WORKDIR}/userdata.raw"
-        fi
-
-        losetup -d "${DEVICE}"
+        losetup -d "${NEW_DEV}"
+        rm -f "${WORKDIR}/userdata.raw"
+        mv "${WORKDIR}/userdata-new.raw" "${WORKDIR}/userdata.raw"
         img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
 
         python3 -c "
