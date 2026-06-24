@@ -75,7 +75,12 @@ with zipfile.ZipFile('${RECOVERY_ZIP}', 'r') as z:
     mkdir -p "${WORKDIR}/rfs"
     mount "${RFS_DEV}" "${WORKDIR}/rfs" 2>/dev/null || mount -o ro "${RFS_DEV}" "${WORKDIR}/rfs"
     for img in boot.img dtbo.img vbmeta.img; do
-        if [ -f "${WORKDIR}/rfs/boot/${img}" ]; then
+        # Files are versioned: boot.img-4.19.325-xiaomi-pipa
+        found=$(ls "${WORKDIR}/rfs/boot/${img}"-* 2>/dev/null | head -1)
+        if [ -f "${found}" ]; then
+            cp "${found}" "${WORKDIR}/${img}"
+            echo "  Extracted ${img} from $(basename ${found})"
+        elif [ -f "${WORKDIR}/rfs/boot/${img}" ]; then
             cp "${WORKDIR}/rfs/boot/${img}" "${WORKDIR}/${img}"
             echo "  Extracted ${img}"
         else
