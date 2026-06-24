@@ -123,4 +123,24 @@ done
 (cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
 rm -rf "${TMP}"
 
+echo "Patching flash_all.sh to copy images to rootfs"
+TMP=$(mktemp -d)
+(cd "${TMP}" && unzip -o "${ZIP_PATH}" "flash_all.sh" 2>/dev/null || true)
+if [ -f "${TMP}/flash_all.sh" ]; then
+    cat >> "${TMP}/flash_all.sh" << 'PATCH'
+
+echo ""
+echo "I: Copying partition images to /"
+for img in vendor.img odm.img; do
+    if [ -f "data/${img}" ]; then
+        echo "I: Copying ${img}"
+        cp "data/${img}" ./
+    fi
+done
+PATCH
+    (cd "${TMP}" && zip -r9 "${ZIP_PATH}" flash_all.sh)
+    echo "flash_all.sh patched"
+fi
+rm -rf "${TMP}"
+
 echo "Partition images injected into userdata.img and added to zip successfully"
