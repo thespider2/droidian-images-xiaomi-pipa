@@ -161,7 +161,10 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
                 umount "${WORKDIR}/mnt"
             fi
         fi
+        # Clean up old VG state before creating new one
         vgchange -an droidian 2>/dev/null || true
+        vgremove -f droidian 2>/dev/null || true
+        rm -rf /dev/droidian 2>/dev/null || true
         losetup -d "${OLD_DEV}"
 
         # Build a fresh larger image with same LVM layout
