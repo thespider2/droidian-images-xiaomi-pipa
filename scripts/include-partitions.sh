@@ -48,6 +48,11 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
+echo "Copying partition images to release"
+for img in ${IMAGES}; do
+    cp "${PART_DIR}/${img}" "${OUT_DIR}/"
+done
+
 echo "Building fastboot zip with partition images"
 
 FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
