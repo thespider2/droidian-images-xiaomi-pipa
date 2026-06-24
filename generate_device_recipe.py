@@ -105,7 +105,7 @@ TEMPLATE_INCLUDE_PARTITIONS = """
     chroot: false
     description: Include partition images
     command: |
-      scripts/include-partitions.sh "{{ $image }}" android-partitions
+      ../scripts/include-partitions.sh "{{ $image }}" android-partitions
 """
 
 def get_matrix(contents):
