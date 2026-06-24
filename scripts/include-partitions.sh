@@ -11,12 +11,7 @@ if [ -z "${ZIP_NAME}" ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ZIP_PATH="${REPO_ROOT}/out/${ZIP_NAME}"
-
-if [ ! -f "${ZIP_PATH}" ]; then
-    echo "Zip not found at ${ZIP_PATH}, skipping partition inclusion"
-    exit 0
-fi
+OUT_DIR="${REPO_ROOT}/out"
 
 [ "${PART_DIR:0:1}" = "/" ] || PART_DIR="${REPO_ROOT}/${PART_DIR}"
 
@@ -53,13 +48,8 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
-echo "Including partition images:${IMAGES}"
-
-TMPDIR=$(mktemp -d)
-mkdir -p "${TMPDIR}/data"
+echo "Copying partition images to ${OUT_DIR}/"
 for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${TMPDIR}/data/"
+    cp "${PART_DIR}/${img}" "${OUT_DIR}/"
 done
-(cd "${TMPDIR}" && zip -r9 "${ZIP_PATH}" data/*)
-rm -rf "${TMPDIR}"
-echo "Images added to zip successfully"
+echo "Images copied successfully"
