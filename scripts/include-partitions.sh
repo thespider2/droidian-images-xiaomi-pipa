@@ -12,10 +12,11 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${REPO_ROOT}/out"
-ZIP_PATH="${OUT_DIR}/${ZIP_NAME}"
+FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME}"
+RECOVERY_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-recovery.zip"
 
-if [ ! -f "${ZIP_PATH}" ]; then
-    echo "Zip not found at ${ZIP_PATH}, skipping"
+if [ ! -f "${FASTBOOT_ZIP}" ]; then
+    echo "Fastboot zip not found at ${FASTBOOT_ZIP}, skipping"
     exit 0
 fi
 
@@ -28,21 +29,21 @@ elif command -v curl >/dev/null 2>&1; then
     DL_CMD="curl -sSLO"
 fi
 
-download_if_missing() {
+get_img() {
     local img="$1"
     if [ -f "${PART_DIR}/${img}" ]; then
-        echo "  ${img}: found locally"
+        echo "  ${img}: using local copy"
+        cp "${PART_DIR}/${img}" "${WORKDIR}/${img}"
         return 0
     fi
     if [ -n "${DL_CMD}" ]; then
-        echo "  ${img}: downloading from repo..."
-        mkdir -p "${PART_DIR}"
+        echo "  ${img}: downloading..."
         (cd "${PART_DIR}" && ${DL_CMD} "${REMOTE_BASE}/${img}")
         if [ -f "${PART_DIR}/${img}" ]; then
+            cp "${PART_DIR}/${img}" "${WORKDIR}/${img}"
             echo "  ${img}: downloaded"
             return 0
         fi
-        echo "  ${img}: failed to download"
     fi
     return 1
 }
@@ -51,176 +52,141 @@ WORKDIR=$(mktemp -d)
 clean() { rm -rf "${WORKDIR}"; }
 trap clean EXIT
 
-# Extract rootfs.img from zip using python3 (unzip may not be in container)
-echo "Extracting rootfs.img from zip..."
+# Get vendor/odm images
+echo "Getting partition images..."
+get_img vendor.img
+get_img odm.img
+
+# === RECOVERY ZIP ===
+echo ""
+echo "=== Building recovery zip ==="
+
+# Extract userdata.img from fastboot zip
 python3 -c "
-import zipfile, sys
-z = zipfile.ZipFile('${ZIP_PATH}', 'r')
-z.extract('data/rootfs.img', '${WORKDIR}')
-" || {
-    echo "Failed to extract rootfs.img from zip"
-    exit 1
-}
+import zipfile
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
+    z.extract('data/userdata.img', '${WORKDIR}')
+"
 
-# Mount rootfs.img and extract boot/dtbo/vbmeta
-echo "Extracting boot/dtbo/vbmeta from rootfs.img..."
-mkdir -p "${WORKDIR}/r"
-mount "${WORKDIR}/data/rootfs.img" "${WORKDIR}/r"
+# Mount LVM, extract rootfs, and inject vendor/odm
+echo "Converting sparse to raw"
+simg2img "${WORKDIR}/data/userdata.img" "${WORKDIR}/userdata.raw"
 
-BOOT_IMAGES=""
-for img in boot.img dtbo.img vbmeta.img; do
-    src="${WORKDIR}/r/boot/${img}"
-    if [ -f "${src}" ]; then
-        cp "${src}" "${WORKDIR}/${img}"
-        BOOT_IMAGES="${BOOT_IMAGES} ${img}"
-        echo "  ${img}: extracted from rootfs"
-    fi
-done
-umount "${WORKDIR}/r"
+echo "Setting up LVM loop"
+DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+vgchange -ay droidian 2>/dev/null || true
+sleep 3
 
-# Download vendor/odm from repo (or use local copies)
-echo "Getting vendor/odm images..."
-IMAGES=""
+ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+if [ -z "${ROOTFS_VOLUME}" ]; then
+    vgscan --mknodes -v 2>/dev/null || true
+    sleep 3
+    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+fi
+ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+
+mkdir -p "${WORKDIR}/mnt"
+mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
+
+# Inject vendor/odm into LVM for the fastboot zip
+echo "Injecting vendor/odm into LVM for fastboot..."
+mkdir -p "${WORKDIR}/mnt/userdata"
 for img in vendor.img odm.img; do
-    download_if_missing "${img}" && IMAGES="${IMAGES} ${img}" && \
-        cp "${PART_DIR}/${img}" "${WORKDIR}/${img}"
+    [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
 done
+sync
 
-ALL_IMAGES="${IMAGES} ${BOOT_IMAGES}"
+# Extract rootfs from LVM to create rootfs.img for recovery zip
+echo "Creating rootfs.img for recovery zip..."
+ROOTFS_SIZE=$(du -sm "${WORKDIR}/mnt" | awk '{print $1}')
+dd if=/dev/zero of="${WORKDIR}/rootfs.img" bs=1M count=$((ROOTFS_SIZE + 250))
+mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file -F "${WORKDIR}/rootfs.img"
+mkdir -p "${WORKDIR}/mnt2"
+mount -o loop "${WORKDIR}/rootfs.img" "${WORKDIR}/mnt2"
+rsync --archive -H -A -X "${WORKDIR}/mnt/" "${WORKDIR}/mnt2/"
+sync
+umount "${WORKDIR}/mnt2"
 
-if [ -z "${ALL_IMAGES}" ]; then
-    echo "No images found, skipping"
-    exit 0
-fi
+# Unmount LVM
+umount "${WORKDIR}/mnt"
+vgchange -an droidian 2>/dev/null || true
+losetup -d "${DEVICE}"
 
-# Add all images to recovery zip at data/
-echo "Adding images to recovery zip at data/"
+# Re-pack userdata.img for fastboot
+img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
+
+# Remove data/ from fastboot zip, replace with updated userdata.img
 python3 -c "
-import zipfile, os
-z = zipfile.ZipFile('${ZIP_PATH}', 'a', zipfile.ZIP_DEFLATED)
-for img in '${ALL_IMAGES}'.split():
-    path = '${WORKDIR}/' + img
-    if os.path.exists(path):
-        z.write(path, 'data/' + img)
-z.close()
-"
-echo "Recovery zip updated with:${ALL_IMAGES}"
-
-# Replace setup.sh with overlay (flashes boot/dtbo/vbmeta from /data/ directly)
-OVERLAY_DIR="${REPO_ROOT}/android-recovery-overlay"
-if [ -f "${OVERLAY_DIR}/setup.sh" ]; then
-    echo "Replacing setup.sh with overlay version"
-    python3 -c "
 import zipfile
-z = zipfile.ZipFile('${ZIP_PATH}', 'a', zipfile.ZIP_DEFLATED)
-z.write('${OVERLAY_DIR}/setup.sh', 'setup.sh')
-z.close()
-"
-fi
+import os
 
-# ---- Fastboot zip: userdata.img with LVM ----
-if command -v simg2img >/dev/null 2>&1 && command -v img2simg >/dev/null 2>&1; then
-    echo "Creating fastboot zip..."
-    FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
-    cp "${ZIP_PATH}" "${FASTBOOT_ZIP}"
-
-    python3 -c "
-import zipfile
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'a', zipfile.ZIP_DEFLATED)
-# Remove vendor/odm from fastboot zip (they go inside userdata.img LVM)
-namelist = z.namelist()
-for name in list(namelist):
-    if name in ('data/vendor.img', 'data/odm.img'):
-        z.remove(name)
-z.close()
-"
-
-    echo "Extracting userdata.img from fastboot zip"
-    python3 -c "
-import zipfile
+# Remove old data/ entries from fastboot zip
 z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
-z.extract('data/userdata.img', '${WORKDIR}')
-"
+keep = [f for f in z.namelist() if not f.startswith('data/')]
+z.close()
 
-    USERDATA_IMG="${WORKDIR}/data/userdata.img"
-    if [ -f "${USERDATA_IMG}" ]; then
-        echo "Converting sparse image to raw"
-        simg2img "${USERDATA_IMG}" "${WORKDIR}/userdata.raw"
-
-        echo "Setting up loop device"
-        DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-
-        echo "Activating LVM"
-        vgchange -ay droidian 2>/dev/null || true
-        sleep 3
-
-        ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-        if [ -z "${ROOTFS_VOLUME}" ]; then
-            echo "LVM volume not found, trying vgscan"
-            vgscan --mknodes -v 2>/dev/null || true
-            sleep 3
-            ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-        fi
-
-        ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
-        echo "Mounting rootfs LV at ${ROOTFS_VOLUME}"
-        mkdir -p "${WORKDIR}/mnt"
-        mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
-
-        echo "Copying vendor/odm to /userdata/ inside LVM"
-        mkdir -p "${WORKDIR}/mnt/userdata"
-        for img in vendor.img odm.img; do
-            if [ -f "${PART_DIR}/${img}" ]; then
-                cp "${PART_DIR}/${img}" "${WORKDIR}/mnt/userdata/"
-                echo "  added ${img}"
-            fi
-        done
-        sync
-
-        echo "Unmounting"
-        umount "${WORKDIR}/mnt"
-        vgchange -an droidian 2>/dev/null || true
-        losetup -d "${DEVICE}"
-
-        echo "Converting back to sparse image"
-        img2simg "${WORKDIR}/userdata.raw" "${USERDATA_IMG}"
-
-        echo "Updating fastboot zip with modified userdata.img"
-        python3 -c "
-import zipfile
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'a', zipfile.ZIP_DEFLATED)
+os.remove('${FASTBOOT_ZIP}')
+z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED)
+for fname in keep:
+    z.write(os.path.join(os.path.dirname('${FASTBOOT_ZIP}'), fname), fname)
 z.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
 z.close()
 "
-    else
-        echo "userdata.img not found in zip, skipping LVM injection"
-    fi
 
-    echo "Fastboot zip created: ${FASTBOOT_ZIP}"
-else
-    echo "simg2img/img2simg not available, skipping fastboot zip"
-fi
+# Download boot/dtbo/vbmeta from fastboot zip
+python3 -c "
+import zipfile
+import os
+os.makedirs('${WORKDIR}/boot', exist_ok=True)
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
+    for f in z.namelist():
+        if f.startswith('data/') and f != 'data/userdata.img':
+            z.extract(f, '${WORKDIR}/boot')
+"
+
+# Build recovery zip from recovery template
+TEMPLATE="${REPO_ROOT}/android-recovery-flashing-template"
+mkdir -p "${WORKDIR}/recovery/data"
+cp "${TEMPLATE}/tools/busybox" "${WORKDIR}/recovery/tools/"
+cp "${TEMPLATE}/META-INF/com/google/android/update-binary" "${WORKDIR}/recovery/META-INF/com/google/android/"
+cp "${TEMPLATE}/META-INF/com/google/android/updater-script" "${WORKDIR}/recovery/META-INF/com/google/android/"
+[ -f "${TEMPLATE}/setup.sh" ] && cp "${TEMPLATE}/setup.sh" "${WORKDIR}/recovery/setup.sh"
+
+# Use overlay setup.sh if present
+OVERLAY="${REPO_ROOT}/android-recovery-overlay/setup.sh"
+[ -f "${OVERLAY}" ] && cp "${OVERLAY}" "${WORKDIR}/recovery/setup.sh"
+
+# Add rootfs.img and all images to data/
+cp "${WORKDIR}/rootfs.img" "${WORKDIR}/recovery/data/"
+for img in vendor.img odm.img; do
+    [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/recovery/data/"
+done
+for img in boot.img dtbo.img vbmeta.img; do
+    [ -f "${WORKDIR}/boot/data/${img}" ] && cp "${WORKDIR}/boot/data/${img}" "${WORKDIR}/recovery/data/"
+done
+
+# Zip recovery
+echo "Creating recovery zip..."
+(cd "${WORKDIR}/recovery" && zip -r9 "${RECOVERY_ZIP}" . -x ".git" "README.md" "*placeholder")
 
 echo ""
 echo "========================================"
-echo "Recovery zip contents:"
+echo "Fastboot zip: ${FASTBOOT_ZIP}"
 echo "========================================"
 python3 -c "
 import zipfile
-z = zipfile.ZipFile('${ZIP_PATH}', 'r')
-for f in z.infolist():
-    print(f'{f.compress_size:>10} {f.file_size:>10} {f.filename}')
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
+    for f in z.infolist():
+        print(f'{f.compress_size:>10} {f.file_size:>10} {f.filename}')
 "
-if [ -n "${FASTBOOT_ZIP}" ] && [ -f "${FASTBOOT_ZIP}" ]; then
-    echo ""
-    echo "========================================"
-    echo "Fastboot zip contents:"
-    echo "========================================"
-    python3 -c "
+echo ""
+echo "========================================"
+echo "Recovery zip: ${RECOVERY_ZIP}"
+echo "========================================"
+python3 -c "
 import zipfile
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
-for f in z.infolist():
-    print(f'{f.compress_size:>10} {f.file_size:>10} {f.filename}')
+with zipfile.ZipFile('${RECOVERY_ZIP}', 'r') as z:
+    for f in z.infolist():
+        print(f'{f.compress_size:>10} {f.file_size:>10} {f.filename}')
 "
-fi
 echo "Done"
