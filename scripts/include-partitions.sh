@@ -12,6 +12,12 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${REPO_ROOT}/out"
+ZIP_PATH="${OUT_DIR}/${ZIP_NAME}"
+
+if [ ! -f "${ZIP_PATH}" ]; then
+    echo "Zip not found at ${ZIP_PATH}, skipping"
+    exit 0
+fi
 
 [ "${PART_DIR:0:1}" = "/" ] || PART_DIR="${REPO_ROOT}/${PART_DIR}"
 
@@ -48,34 +54,64 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
-echo "Building fastboot zip with partition images"
+if ! command -v simg2img >/dev/null 2>&1 || ! command -v img2simg >/dev/null 2>&1; then
+    echo "simg2img/img2simg not available, skipping"
+    exit 0
+fi
 
-FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
-TMPDIR=$(mktemp -d)
-mkdir -p "${TMPDIR}/userdata"
+WORKDIR=$(mktemp -d)
+clean() { rm -rf "${WORKDIR}"; }
+trap clean EXIT
 
+echo "Extracting userdata.img from zip"
+(cd "${WORKDIR}" && unzip -o "${ZIP_PATH}" "data/userdata.img")
+
+USERDATA_IMG="${WORKDIR}/data/userdata.img"
+if [ ! -f "${USERDATA_IMG}" ]; then
+    echo "userdata.img not found in zip, skipping"
+    exit 0
+fi
+
+echo "Converting sparse image to raw"
+simg2img "${USERDATA_IMG}" "${WORKDIR}/userdata.raw"
+
+echo "Setting up loop device"
+DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+
+echo "Activating LVM"
+vgchange -ay droidian 2>/dev/null || true
+sleep 3
+
+ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+if [ -z "${ROOTFS_VOLUME}" ]; then
+    echo "LVM volume not found, trying vgscan"
+    vgscan --mknodes -v 2>/dev/null || true
+    sleep 3
+    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+fi
+
+ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+echo "Mounting rootfs LV at ${ROOTFS_VOLUME}"
+mkdir -p "${WORKDIR}/mnt"
+mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
+
+echo "Copying images to /userdata/"
+mkdir -p "${WORKDIR}/mnt/userdata"
 for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${TMPDIR}/userdata/"
+    cp "${PART_DIR}/${img}" "${WORKDIR}/mnt/userdata/"
+    echo "  added ${img}"
 done
+sync
 
-cat > "${TMPDIR}/flash-partitions.sh" << 'SCRIPT'
-#!/bin/bash
-set -e
+echo "Unmounting"
+umount "${WORKDIR}/mnt"
+vgchange -an droidian 2>/dev/null || true
+losetup -d "${DEVICE}"
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "Converting back to sparse image"
+img2simg "${WORKDIR}/userdata.raw" "${USERDATA_IMG}"
 
-echo "Flashing vendor partition..."
-fastboot flash vendor "${DIR}/userdata/vendor.img" || echo "vendor partition may not exist"
+echo "Updating zip"
+(cd "${WORKDIR}" && zip -r9 "${ZIP_PATH}" "data/userdata.img")
 
-echo "Flashing odm partition..."
-fastboot flash odm "${DIR}/userdata/odm.img" || echo "odm partition may not exist"
-
-echo "Rebooting..."
-fastboot reboot || true
-SCRIPT
-chmod +x "${TMPDIR}/flash-partitions.sh"
-
-(cd "${TMPDIR}" && zip -r9 "${FASTBOOT_ZIP}" .)
-rm -rf "${TMPDIR}"
-
-echo "Fastboot zip created: ${FASTBOOT_ZIP}"
+echo "Partition images injected into userdata.img successfully"
