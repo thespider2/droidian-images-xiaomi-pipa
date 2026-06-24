@@ -59,14 +59,37 @@ echo "Getting partition images..."
 get_img vendor.img
 get_img odm.img
 
-# === RECOVERY ZIP: add vendor/odm to data/ ===
+# === RECOVERY ZIP: extract boot/dtbo/vbmeta from rootfs, add to data/ ===
 if [ -f "${RECOVERY_ZIP}" ]; then
     echo ""
     echo "=== Updating recovery zip ==="
     python3 -c "
+import zipfile
+with zipfile.ZipFile('${RECOVERY_ZIP}', 'r') as z:
+    z.extract('data/rootfs.img', '${WORKDIR}')
+"
+    # Extract boot/dtbo/vbmeta from rootfs.img
+    simg2img "${WORKDIR}/data/rootfs.img" "${WORKDIR}/rootfs.raw" 2>/dev/null || \
+        cp "${WORKDIR}/data/rootfs.img" "${WORKDIR}/rootfs.raw"
+    RFS_DEV=$(losetup -f --show "${WORKDIR}/rootfs.raw")
+    mkdir -p "${WORKDIR}/rfs"
+    mount "${RFS_DEV}" "${WORKDIR}/rfs" 2>/dev/null || mount -o ro "${RFS_DEV}" "${WORKDIR}/rfs"
+    for img in boot.img dtbo.img vbmeta.img; do
+        if [ -f "${WORKDIR}/rfs/boot/${img}" ]; then
+            cp "${WORKDIR}/rfs/boot/${img}" "${WORKDIR}/${img}"
+            echo "  Extracted ${img}"
+        else
+            echo "  WARNING: ${img} not found in rootfs/boot/"
+        fi
+    done
+    umount "${WORKDIR}/rfs"
+    losetup -d "${RFS_DEV}"
+    rm -f "${WORKDIR}/rootfs.raw"
+
+    python3 -c "
 import zipfile, os
 z = zipfile.ZipFile('${RECOVERY_ZIP}', 'a', zipfile.ZIP_DEFLATED)
-for img in ('vendor.img', 'odm.img'):
+for img in ('vendor.img', 'odm.img', 'boot.img', 'dtbo.img', 'vbmeta.img'):
     p = '${WORKDIR}/' + img
     if os.path.exists(p):
         z.write(p, 'data/' + img)
@@ -85,30 +108,80 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
     z.extract('data/userdata.img', '${WORKDIR}')
 "
     simg2img "${WORKDIR}/data/userdata.img" "${WORKDIR}/userdata.raw"
-    DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-    vgchange -ay droidian 2>/dev/null || true
-    sleep 3
 
-    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-    if [ -z "${ROOTFS_VOLUME}" ]; then
-        vgscan --mknodes -v 2>/dev/null || true; sleep 3
+    VENDOR_SIZE=$(stat -c%s "${WORKDIR}/vendor.img" 2>/dev/null || echo 0)
+    ODM_SIZE=$(stat -c%s "${WORKDIR}/odm.img" 2>/dev/null || echo 0)
+    EXTRA_NEEDED=$((VENDOR_SIZE + ODM_SIZE + 50*1024*1024))  # +50MB margin
+
+    if [ "${EXTRA_NEEDED}" -le 0 ]; then
+        echo "  No partition images to inject, skipping fastboot zip update"
+        rm -f "${WORKDIR}/userdata.raw"
+        img2simg "${WORKDIR}/data/userdata.img" "${WORKDIR}/data/userdata.img" 2>/dev/null || true
+    else
+        echo "  Extra space needed: $((EXTRA_NEEDED / 1024 / 1024)) MB"
+
+        DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+        # Grow the raw image to make room for vendor/odm
+        truncate -s "+${EXTRA_NEEDED}" "${WORKDIR}/userdata.raw"
+        losetup -c "${DEVICE}" 2>/dev/null || true
+        pvresize "${DEVICE}"
+
+        vgchange -ay droidian 2>/dev/null || true
+        sleep 3
+
         ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-    fi
-    ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+        if [ -z "${ROOTFS_VOLUME}" ]; then
+            vgscan --mknodes -v 2>/dev/null || true; sleep 3
+            ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+        fi
 
-    mkdir -p "${WORKDIR}/mnt"
-    mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
-    mkdir -p "${WORKDIR}/mnt/userdata"
-    for img in vendor.img odm.img; do
-        [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
-    done
-    sync
-    umount "${WORKDIR}/mnt"
-    vgchange -an droidian 2>/dev/null || true
-    losetup -d "${DEVICE}"
-    img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
+        # Extend LV and filesystem to fit vendor/odm
+        if [ -n "${ROOTFS_VOLUME}" ] && [ "${EXTRA_NEEDED}" -gt 0 ]; then
+            lvextend -L "+${EXTRA_NEEDED}" "${ROOTFS_VOLUME}" 2>/dev/null
+            resize2fs "${ROOTFS_VOLUME}" 2>/dev/null
+        fi
 
-    python3 -c "
+        ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+
+        mkdir -p "${WORKDIR}/mnt"
+        mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
+        mkdir -p "${WORKDIR}/mnt/userdata"
+        for img in vendor.img odm.img; do
+            [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
+        done
+        sync
+
+        umount "${WORKDIR}/mnt"
+
+        # Shrink FS to minimum, then match LV and PV
+        ROOTFS_DEV="${ROOTFS_VOLUME/\/host-dev/\/dev}"
+        if [ -n "${ROOTFS_DEV}" ] && [ -b "${ROOTFS_DEV}" ]; then
+            e2fsck -fy "${ROOTFS_DEV}" 2>/dev/null || true
+            resize2fs -M "${ROOTFS_DEV}" 2>/dev/null || true
+            BLOCK_COUNT=$(dumpe2fs -h "${ROOTFS_DEV}" 2>/dev/null | awk '/Block count:/{print $3}')
+            BLOCK_SIZE=$(dumpe2fs -h "${ROOTFS_DEV}" 2>/dev/null | awk '/Block size:/{print $3}')
+            if [ -n "${BLOCK_COUNT}" ] && [ -n "${BLOCK_SIZE}" ]; then
+                MIN_LV_BYTES=$((BLOCK_COUNT * BLOCK_SIZE + 50*1024*1024))
+                lvreduce -f -L "${MIN_LV_BYTES}B" "${ROOTFS_DEV}" 2>/dev/null || true
+            fi
+        fi
+
+        vgchange -an droidian 2>/dev/null || true
+
+        # Shrink the raw image to minimal size using allocated PE count
+        ALLOC_PES=$(pvs --noheadings -o pv_pe_alloc_count "${DEVICE}" 2>/dev/null | tr -d ' ')
+        PE_SIZE=$(pvs --noheadings -o pe_size --units b "${DEVICE}" 2>/dev/null | awk '{print $1}' | tr -d ' B')
+        if [ -n "${ALLOC_PES}" ] && [ -n "${PE_SIZE}" ] && [ "${ALLOC_PES}" -gt 0 ]; then
+            # Add 1 PE of slack and 1 PE for LVM metadata headers
+            TARGET_PV_BYTES=$(( (ALLOC_PES + 2) * PE_SIZE ))
+            pvresize --setphysicalvolumesize "${TARGET_PV_BYTES}B" "${DEVICE}" 2>/dev/null || true
+            truncate -s "${TARGET_PV_BYTES}" "${WORKDIR}/userdata.raw"
+        fi
+
+        losetup -d "${DEVICE}"
+        img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
+
+        python3 -c "
 import zipfile, os
 z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
 keep = [f for f in z.namelist() if not f.startswith('data/')]
@@ -120,7 +193,8 @@ for fname in keep:
 z.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
 z.close()
 "
-    echo "Fastboot zip updated"
+        echo "Fastboot zip updated"
+    fi
 fi
 
 echo ""
