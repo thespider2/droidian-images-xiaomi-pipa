@@ -54,81 +54,42 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
-if ! command -v simg2img >/dev/null 2>&1 || ! command -v img2simg >/dev/null 2>&1; then
-    echo "simg2img/img2simg not available, skipping"
-    exit 0
-fi
+BOOT_DIR="${4:-${PART_DIR}}"
 
-WORKDIR=$(mktemp -d)
-clean() { rm -rf "${WORKDIR}"; }
-trap clean EXIT
+for img in boot.img dtbo.img vbmeta.img; do
+    if [ -f "${BOOT_DIR}/${img}" ]; then
+        BOOT_IMAGES="${BOOT_IMAGES} ${img}"
+        echo "Found ${img} locally"
+        continue
+    fi
 
-echo "Extracting userdata.img from zip"
-(cd "${WORKDIR}" && unzip -o "${ZIP_PATH}" "data/userdata.img")
-
-USERDATA_IMG="${WORKDIR}/data/userdata.img"
-if [ ! -f "${USERDATA_IMG}" ]; then
-    echo "userdata.img not found in zip, skipping"
-    exit 0
-fi
-
-echo "Converting sparse image to raw"
-simg2img "${USERDATA_IMG}" "${WORKDIR}/userdata.raw"
-
-echo "Setting up loop device"
-DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-
-echo "Activating LVM"
-vgchange -ay droidian 2>/dev/null || true
-sleep 3
-
-ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-if [ -z "${ROOTFS_VOLUME}" ]; then
-    echo "LVM volume not found, trying vgscan"
-    vgscan --mknodes -v 2>/dev/null || true
-    sleep 3
-    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-fi
-
-ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
-echo "Mounting rootfs LV at ${ROOTFS_VOLUME}"
-mkdir -p "${WORKDIR}/mnt"
-mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
-
-echo "Copying images to /userdata/"
-mkdir -p "${WORKDIR}/mnt/userdata"
-for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${WORKDIR}/mnt/userdata/"
-    echo "  added ${img}"
+    if [ -n "${DL_CMD}" ]; then
+        echo "Downloading ${img} from ${REMOTE_BASE}/..."
+        (cd "${PART_DIR}" && ${DL_CMD} "${REMOTE_BASE}/${img}")
+        if [ -f "${PART_DIR}/${img}" ]; then
+            BOOT_IMAGES="${BOOT_IMAGES} ${img}"
+            echo "Downloaded ${img}"
+        else
+            echo "Failed to download ${img}, skipping"
+        fi
+    fi
 done
-sync
 
-echo "Unmounting"
-umount "${WORKDIR}/mnt"
-vgchange -an droidian 2>/dev/null || true
-losetup -d "${DEVICE}"
+ALL_IMAGES="${IMAGES} ${BOOT_IMAGES}"
 
-echo "Converting back to sparse image"
-img2simg "${WORKDIR}/userdata.raw" "${USERDATA_IMG}"
-
-echo "Updating zip with modified userdata.img"
-(cd "${WORKDIR}" && zip -r9 "${ZIP_PATH}" "data/userdata.img")
+if [ -z "${ALL_IMAGES}" ]; then
+    echo "No images found, skipping"
+    exit 0
+fi
 
 echo "Adding images to recovery zip at data/"
 TMP=$(mktemp -d)
+clean() { rm -rf "${TMP}"; }
+trap clean EXIT
 mkdir "${TMP}/data"
-for img in ${IMAGES}; do
+for img in ${ALL_IMAGES}; do
     cp "${PART_DIR}/${img}" "${TMP}/data/"
 done
 (cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
-rm -rf "${TMP}"
 
-echo "Creating fastboot zip (images only inside userdata.img)"
-FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
-cp "${ZIP_PATH}" "${FASTBOOT_ZIP}"
-for img in ${IMAGES}; do
-    zip -d "${FASTBOOT_ZIP}" "data/${img}" 2>/dev/null || true
-done
-echo "Fastboot zip created: ${FASTBOOT_ZIP}"
-
-echo "Partition images injected into userdata.img and added to zip successfully"
+echo "Images added to recovery zip: ${ALL_IMAGES}"
