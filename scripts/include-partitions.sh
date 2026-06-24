@@ -158,4 +158,17 @@ else
     echo "simg2img/img2simg not available, skipping fastboot zip"
 fi
 
+echo ""
+echo "========================================"
+echo "Recovery zip contents:"
+echo "========================================"
+unzip -l "${ZIP_PATH}" | head -30
+echo ""
+if [ -f "${FASTBOOT_ZIP}" ]; then
+    echo "========================================"
+    echo "Fastboot zip contents:"
+    echo "========================================"
+    unzip -l "${FASTBOOT_ZIP}" | head -30
+    echo ""
+fi
 echo "Done"
