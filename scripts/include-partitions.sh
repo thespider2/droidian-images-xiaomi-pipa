@@ -23,7 +23,7 @@ elif command -v curl >/dev/null 2>&1; then
     DL_CMD="curl -sSLO"
 fi
 
-for img in vendor.img odm.img product.img; do
+for img in vendor.img odm.img; do
     if [ -f "${PART_DIR}/${img}" ]; then
         IMAGES="${IMAGES} ${img}"
         echo "Found ${img} locally"
@@ -48,11 +48,6 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
-echo "Copying partition images to release"
-for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${OUT_DIR}/"
-done
-
 echo "Building fastboot zip with partition images"
 
 FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
@@ -73,9 +68,6 @@ fastboot flash vendor "${DIR}/vendor.img" || echo "vendor partition may not exis
 
 echo "Flashing odm partition..."
 fastboot flash odm "${DIR}/odm.img" || echo "odm partition may not exist"
-
-echo "Flashing product partition..."
-fastboot flash product "${DIR}/product.img" || echo "product partition may not exist"
 
 echo "Rebooting..."
 fastboot reboot || true
