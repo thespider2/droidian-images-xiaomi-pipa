@@ -123,28 +123,6 @@ done
 (cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
 rm -rf "${TMP}"
 
-echo "Patching setup.sh to copy images into rootfs"
-TMP=$(mktemp -d)
-# Try extracting setup.sh from zip, fallback to submodule
-(cd "${TMP}" && unzip -o "${ZIP_PATH}" "setup.sh" 2>/dev/null || true)
-if [ ! -f "${TMP}/setup.sh" ]; then
-    cp "${REPO_ROOT}/android-recovery-flashing-template/setup.sh" "${TMP}/setup.sh" 2>/dev/null || true
-fi
-if [ -f "${TMP}/setup.sh" ]; then
-    sed -i '/^mount \/data\/rootfs.img \/r;/a\
-\
-# Copy vendor and odm images into rootfs\
-if [ -f /data/vendor.img ]; then\
-    ui_print "Copying vendor image to rootfs"\
-    cp /data/vendor.img /r/vendor.img\
-fi\
-if [ -f /data/odm.img ]; then\
-    ui_print "Copying odm image to rootfs"\
-    cp /data/odm.img /r/odm.img\
-fi' "${TMP}/setup.sh"
-    (cd "${TMP}" && zip -r9 "${ZIP_PATH}" setup.sh)
-    echo "setup.sh patched"
-fi
-rm -rf "${TMP}"
+
 
 echo "Partition images injected into userdata.img and added to zip successfully"
