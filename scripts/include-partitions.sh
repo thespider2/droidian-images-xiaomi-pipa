@@ -154,6 +154,7 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
             MOUNT_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
             [ ! -e "${MOUNT_PATH}" ] && MOUNT_PATH="${LV_PATH/\/dev/\/host-dev}"
 
+            mkdir -p "${WORKDIR}/mnt"
             mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt" 2>/dev/null || true
             if mountpoint -q "${WORKDIR}/mnt"; then
                 echo "  Backing up rootfs contents"
@@ -198,6 +199,7 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
 
             mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file "${LV_PATH}" 2>/dev/null || \
                 mkfs.ext4 "${LV_PATH}"
+            mkdir -p "${WORKDIR}/mnt"
             mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt"
 
             if [ -f "${WORKDIR}/rootfs.tar" ]; then
