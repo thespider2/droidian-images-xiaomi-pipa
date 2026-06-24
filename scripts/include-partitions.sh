@@ -114,7 +114,7 @@ img2simg "${WORKDIR}/userdata.raw" "${USERDATA_IMG}"
 echo "Updating zip with modified userdata.img"
 (cd "${WORKDIR}" && zip -r9 "${ZIP_PATH}" "data/userdata.img")
 
-echo "Adding images to zip at data/"
+echo "Adding images to recovery zip at data/"
 TMP=$(mktemp -d)
 mkdir "${TMP}/data"
 for img in ${IMAGES}; do
@@ -123,6 +123,12 @@ done
 (cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
 rm -rf "${TMP}"
 
-
+echo "Creating fastboot zip (images only inside userdata.img)"
+FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
+cp "${ZIP_PATH}" "${FASTBOOT_ZIP}"
+for img in ${IMAGES}; do
+    zip -d "${FASTBOOT_ZIP}" "data/${img}" 2>/dev/null || true
+done
+echo "Fastboot zip created: ${FASTBOOT_ZIP}"
 
 echo "Partition images injected into userdata.img and added to zip successfully"
