@@ -48,8 +48,36 @@ if [ -z "${IMAGES}" ]; then
     exit 0
 fi
 
-echo "Copying partition images to ${OUT_DIR}/"
+echo "Building fastboot zip with partition images"
+
+FASTBOOT_ZIP="${OUT_DIR}/${ZIP_NAME%.zip}-fastboot.zip"
+TMPDIR=$(mktemp -d)
+
 for img in ${IMAGES}; do
-    cp "${PART_DIR}/${img}" "${OUT_DIR}/"
+    cp "${PART_DIR}/${img}" "${TMPDIR}/"
 done
-echo "Images copied successfully"
+
+cat > "${TMPDIR}/flash-partitions.sh" << 'SCRIPT'
+#!/bin/bash
+set -e
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "Flashing vendor partition..."
+fastboot flash vendor "${DIR}/vendor.img" || echo "vendor partition may not exist"
+
+echo "Flashing odm partition..."
+fastboot flash odm "${DIR}/odm.img" || echo "odm partition may not exist"
+
+echo "Flashing product partition..."
+fastboot flash product "${DIR}/product.img" || echo "product partition may not exist"
+
+echo "Rebooting..."
+fastboot reboot || true
+SCRIPT
+chmod +x "${TMPDIR}/flash-partitions.sh"
+
+(cd "${TMPDIR}" && zip -r9 "${FASTBOOT_ZIP}" .)
+rm -rf "${TMPDIR}"
+
+echo "Fastboot zip created: ${FASTBOOT_ZIP}"
