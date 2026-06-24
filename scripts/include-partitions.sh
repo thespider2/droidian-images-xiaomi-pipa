@@ -134,22 +134,24 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
         vgchange -ay droidian 2>/dev/null || true
         sleep 3
 
-        ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-        if [ -z "${ROOTFS_VOLUME}" ]; then
+        # Use the LV logical path for LVM operations, not resolved device
+        LV_PATH="/dev/mapper/droidian-droidian--rootfs"
+        if [ ! -e "${LV_PATH}" ]; then
             vgscan --mknodes -v 2>/dev/null || true; sleep 3
-            ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
         fi
+
+        # Also get the /host-dev path for mounting
+        ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
+        HOST_DEV_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
 
         # Extend LV and filesystem to fit vendor/odm
-        if [ -n "${ROOTFS_VOLUME}" ] && [ "${EXTRA_NEEDED}" -gt 0 ]; then
-            lvextend -L "+${EXTRA_NEEDED}" "${ROOTFS_VOLUME}" 2>/dev/null
-            resize2fs "${ROOTFS_VOLUME}" 2>/dev/null
+        if [ "${EXTRA_NEEDED}" -gt 0 ]; then
+            lvextend -L "+${EXTRA_NEEDED}" "${LV_PATH}" 2>/dev/null || echo "  WARNING: lvextend failed, continuing"
+            resize2fs "${LV_PATH}" 2>/dev/null || echo "  WARNING: resize2fs failed, continuing"
         fi
 
-        ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
-
         mkdir -p "${WORKDIR}/mnt"
-        mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
+        mount "${HOST_DEV_PATH}" "${WORKDIR}/mnt"
         mkdir -p "${WORKDIR}/mnt/userdata"
         for img in vendor.img odm.img; do
             [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
@@ -159,15 +161,14 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
         umount "${WORKDIR}/mnt"
 
         # Shrink FS to minimum, then match LV and PV
-        ROOTFS_DEV="${ROOTFS_VOLUME/\/host-dev/\/dev}"
-        if [ -n "${ROOTFS_DEV}" ] && [ -b "${ROOTFS_DEV}" ]; then
-            e2fsck -fy "${ROOTFS_DEV}" 2>/dev/null || true
-            resize2fs -M "${ROOTFS_DEV}" 2>/dev/null || true
-            BLOCK_COUNT=$(dumpe2fs -h "${ROOTFS_DEV}" 2>/dev/null | awk '/Block count:/{print $3}')
-            BLOCK_SIZE=$(dumpe2fs -h "${ROOTFS_DEV}" 2>/dev/null | awk '/Block size:/{print $3}')
+        if [ -e "${LV_PATH}" ]; then
+            e2fsck -fy "${LV_PATH}" 2>/dev/null || true
+            resize2fs -M "${LV_PATH}" 2>/dev/null || true
+            BLOCK_COUNT=$(dumpe2fs -h "${LV_PATH}" 2>/dev/null | awk '/Block count:/{print $3}')
+            BLOCK_SIZE=$(dumpe2fs -h "${LV_PATH}" 2>/dev/null | awk '/Block size:/{print $3}')
             if [ -n "${BLOCK_COUNT}" ] && [ -n "${BLOCK_SIZE}" ]; then
                 MIN_LV_BYTES=$((BLOCK_COUNT * BLOCK_SIZE + 50*1024*1024))
-                lvreduce -f -L "${MIN_LV_BYTES}B" "${ROOTFS_DEV}" 2>/dev/null || true
+                lvreduce -f -L "${MIN_LV_BYTES}B" "${LV_PATH}" 2>/dev/null || true
             fi
         fi
 
