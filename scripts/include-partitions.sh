@@ -123,23 +123,27 @@ done
 (cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
 rm -rf "${TMP}"
 
-echo "Patching flash_all.sh to copy images to rootfs"
+echo "Patching setup.sh to copy images into rootfs"
 TMP=$(mktemp -d)
-(cd "${TMP}" && unzip -o "${ZIP_PATH}" "flash_all.sh" 2>/dev/null || true)
-if [ -f "${TMP}/flash_all.sh" ]; then
-    cat >> "${TMP}/flash_all.sh" << 'PATCH'
-
-echo ""
-echo "I: Copying partition images to /"
-for img in vendor.img odm.img; do
-    if [ -f "data/${img}" ]; then
-        echo "I: Copying ${img}"
-        cp "data/${img}" ./
-    fi
-done
-PATCH
-    (cd "${TMP}" && zip -r9 "${ZIP_PATH}" flash_all.sh)
-    echo "flash_all.sh patched"
+# Try extracting setup.sh from zip, fallback to submodule
+(cd "${TMP}" && unzip -o "${ZIP_PATH}" "setup.sh" 2>/dev/null || true)
+if [ ! -f "${TMP}/setup.sh" ]; then
+    cp "${REPO_ROOT}/android-recovery-flashing-template/setup.sh" "${TMP}/setup.sh" 2>/dev/null || true
+fi
+if [ -f "${TMP}/setup.sh" ]; then
+    sed -i '/^mount \/data\/rootfs.img \/r;/a\
+\
+# Copy vendor and odm images into rootfs\
+if [ -f /data/vendor.img ]; then\
+    ui_print "Copying vendor image to rootfs"\
+    cp /data/vendor.img /r/vendor.img\
+fi\
+if [ -f /data/odm.img ]; then\
+    ui_print "Copying odm image to rootfs"\
+    cp /data/odm.img /r/odm.img\
+fi' "${TMP}/setup.sh"
+    (cd "${TMP}" && zip -r9 "${ZIP_PATH}" setup.sh)
+    echo "setup.sh patched"
 fi
 rm -rf "${TMP}"
 
