@@ -51,7 +51,13 @@ get_img() {
 }
 
 WORKDIR=$(mktemp -d)
-clean() { rm -rf "${WORKDIR}"; }
+clean() {
+    umount "${WORKDIR}/mnt" 2>/dev/null || true
+    umount "${WORKDIR}/rfs" 2>/dev/null || true
+    vgchange -an droidian 2>/dev/null || true
+    losetup -d "${DEVICE}" 2>/dev/null || true
+    rm -rf "${WORKDIR}" 2>/dev/null || true
+}
 trap clean EXIT
 
 # Get vendor/odm
@@ -126,32 +132,59 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
         echo "  Extra space needed: $((EXTRA_NEEDED / 1024 / 1024)) MB"
 
         DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-        # Grow the raw image to make room for vendor/odm
+
+        # Detach loop before truncating, then re-attach so it sees the new size
+        losetup -d "${DEVICE}"
         truncate -s "+${EXTRA_NEEDED}" "${WORKDIR}/userdata.raw"
-        losetup -c "${DEVICE}" 2>/dev/null || true
+        DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+
         pvresize "${DEVICE}"
 
         vgchange -ay droidian 2>/dev/null || true
         sleep 3
 
-        # Use the LV logical path for LVM operations, not resolved device
-        LV_PATH="/dev/mapper/droidian-droidian--rootfs"
-        if [ ! -e "${LV_PATH}" ]; then
+        # Find the LV path (handle both naming conventions)
+        LV_PATH=""
+        for p in /dev/mapper/droidian-droidian--rootfs /dev/droidian/droidian-rootfs; do
+            [ -e "${p}" ] && LV_PATH="${p}" && break
+        done
+        if [ -z "${LV_PATH}" ]; then
             vgscan --mknodes -v 2>/dev/null || true; sleep 3
+            for p in /dev/mapper/droidian-droidian--rootfs /dev/droidian/droidian-rootfs; do
+                [ -e "${p}" ] && LV_PATH="${p}" && break
+            done
         fi
 
-        # Also get the /host-dev path for mounting
-        ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
-        HOST_DEV_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
-
         # Extend LV and filesystem to fit vendor/odm
-        if [ "${EXTRA_NEEDED}" -gt 0 ]; then
-            lvextend -L "+${EXTRA_NEEDED}" "${LV_PATH}" 2>/dev/null || echo "  WARNING: lvextend failed, continuing"
-            resize2fs "${LV_PATH}" 2>/dev/null || echo "  WARNING: resize2fs failed, continuing"
+        LV_EXTENDED=false
+        if [ -n "${LV_PATH}" ] && [ "${EXTRA_NEEDED}" -gt 0 ]; then
+            if lvextend -L "+${EXTRA_NEEDED}" "${LV_PATH}" 2>/dev/null; then
+                LV_EXTENDED=true
+                resize2fs "${LV_PATH}" 2>/dev/null || true
+            else
+                echo "  WARNING: lvextend failed, not enough free space"
+            fi
+        fi
+
+        # Resolve /host-dev path for mounting
+        ROOTFS_VOLUME=$(realpath "${LV_PATH}" 2>/dev/null || echo "${LV_PATH}")
+        MOUNT_PATH="${ROOTFS_VOLUME/\/dev/\/host-dev}"
+        if [ ! -e "${MOUNT_PATH}" ] && [ -n "${LV_PATH}" ]; then
+            MOUNT_PATH="${LV_PATH/\/dev/\/host-dev}"
         fi
 
         mkdir -p "${WORKDIR}/mnt"
-        mount "${HOST_DEV_PATH}" "${WORKDIR}/mnt"
+        mount "${MOUNT_PATH}" "${WORKDIR}/mnt" 2>/dev/null || mount "${LV_PATH}" "${WORKDIR}/mnt"
+
+        if [ "${LV_EXTENDED}" = false ]; then
+            # Check available space before attempting copy
+            AVAIL=$(df --output=avail "${WORKDIR}/mnt" 2>/dev/null | tail -1 || echo 0)
+            NEED=$(( (VENDOR_SIZE + ODM_SIZE) / 1024 ))
+            if [ "${AVAIL}" -lt "${NEED}" ]; then
+                echo "  WARNING: not enough space (${AVAIL}KB available, ${NEED}KB needed), skipping copy"
+                umount "${WORKDIR}/mnt" 2>/dev/null || true
+            fi
+        fi
         mkdir -p "${WORKDIR}/mnt/userdata"
         for img in vendor.img odm.img; do
             [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
