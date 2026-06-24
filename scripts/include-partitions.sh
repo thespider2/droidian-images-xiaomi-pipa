@@ -20,6 +20,16 @@ if [ ! -f "${FASTBOOT_ZIP}" ]; then
     exit 0
 fi
 
+# Find the rootfs from the debos build directory
+ROOTFS_PATH=$(find ${REPO_ROOT} -maxdepth 2 -mindepth 2 -type d -name '.debos-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | awk '{ print $2 }')/root
+if [ -z "${ROOTFS_PATH}" ] || [ ! -d "${ROOTFS_PATH}" ]; then
+    echo "Rootfs path not found, trying .."
+    ROOTFS_PATH=$(find .. -maxdepth 2 -mindepth 2 -type d -name '.debos-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | awk '{ print $2 }')/root
+fi
+if [ ! -d "${ROOTFS_PATH}" ]; then
+    echo "Rootfs path not found, falling back to LVM extraction"
+fi
+
 [ "${PART_DIR:0:1}" = "/" ] || PART_DIR="${REPO_ROOT}/${PART_DIR}"
 
 DL_CMD=""
@@ -52,91 +62,14 @@ WORKDIR=$(mktemp -d)
 clean() { rm -rf "${WORKDIR}"; }
 trap clean EXIT
 
-# Get vendor/odm images
+# Get vendor/odm
 echo "Getting partition images..."
 get_img vendor.img
 get_img odm.img
 
-# === RECOVERY ZIP ===
-echo ""
-echo "=== Building recovery zip ==="
-
-# Extract userdata.img from fastboot zip
+# Get boot/dtbo/vbmeta from fastboot zip (extracted by genimage.sh from rootfs/boot)
 python3 -c "
-import zipfile
-with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
-    z.extract('data/userdata.img', '${WORKDIR}')
-"
-
-# Mount LVM, extract rootfs, and inject vendor/odm
-echo "Converting sparse to raw"
-simg2img "${WORKDIR}/data/userdata.img" "${WORKDIR}/userdata.raw"
-
-echo "Setting up LVM loop"
-DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
-vgchange -ay droidian 2>/dev/null || true
-sleep 3
-
-ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-if [ -z "${ROOTFS_VOLUME}" ]; then
-    vgscan --mknodes -v 2>/dev/null || true
-    sleep 3
-    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
-fi
-ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
-
-mkdir -p "${WORKDIR}/mnt"
-mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt"
-
-# Inject vendor/odm into LVM for the fastboot zip
-echo "Injecting vendor/odm into LVM for fastboot..."
-mkdir -p "${WORKDIR}/mnt/userdata"
-for img in vendor.img odm.img; do
-    [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt/userdata/"
-done
-sync
-
-# Extract rootfs from LVM to create rootfs.img for recovery zip
-echo "Creating rootfs.img for recovery zip..."
-ROOTFS_SIZE=$(du -sm "${WORKDIR}/mnt" | awk '{print $1}')
-dd if=/dev/zero of="${WORKDIR}/rootfs.img" bs=1M count=$((ROOTFS_SIZE + 250))
-mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file -F "${WORKDIR}/rootfs.img"
-mkdir -p "${WORKDIR}/mnt2"
-mount -o loop "${WORKDIR}/rootfs.img" "${WORKDIR}/mnt2"
-rsync --archive -H -A -X "${WORKDIR}/mnt/" "${WORKDIR}/mnt2/"
-sync
-umount "${WORKDIR}/mnt2"
-
-# Unmount LVM
-umount "${WORKDIR}/mnt"
-vgchange -an droidian 2>/dev/null || true
-losetup -d "${DEVICE}"
-
-# Re-pack userdata.img for fastboot
-img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
-
-# Remove data/ from fastboot zip, replace with updated userdata.img
-python3 -c "
-import zipfile
-import os
-
-# Remove old data/ entries from fastboot zip
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
-keep = [f for f in z.namelist() if not f.startswith('data/')]
-z.close()
-
-os.remove('${FASTBOOT_ZIP}')
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED)
-for fname in keep:
-    z.write(os.path.join(os.path.dirname('${FASTBOOT_ZIP}'), fname), fname)
-z.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
-z.close()
-"
-
-# Download boot/dtbo/vbmeta from fastboot zip
-python3 -c "
-import zipfile
-import os
+import zipfile, os
 os.makedirs('${WORKDIR}/boot', exist_ok=True)
 with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
     for f in z.namelist():
@@ -144,19 +77,67 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
             z.extract(f, '${WORKDIR}/boot')
 "
 
+# === RECOVERY ZIP ===
+echo ""
+echo "=== Building recovery zip ==="
+
+# Create rootfs.img from debos rootfs, or extract from LVM as fallback
+if [ -d "${ROOTFS_PATH}" ]; then
+    echo "Creating rootfs.img from debos rootfs..."
+    ROOTFS_SIZE=$(du -sm "${ROOTFS_PATH}" | awk '{print $1}')
+    dd if=/dev/zero of="${WORKDIR}/rootfs.img" bs=1M count=$((ROOTFS_SIZE + 250))
+    mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file -F "${WORKDIR}/rootfs.img"
+    mkdir -p "${WORKDIR}/mnt"
+    mount -o loop "${WORKDIR}/rootfs.img" "${WORKDIR}/mnt"
+    rsync --archive -H -A -X "${ROOTFS_PATH}/" "${WORKDIR}/mnt/"
+    sync
+    umount "${WORKDIR}/mnt"
+else
+    echo "Extracting rootfs from LVM userdata.img..."
+    python3 -c "
+import zipfile
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
+    z.extract('data/userdata.img', '${WORKDIR}')
+"
+    simg2img "${WORKDIR}/data/userdata.img" "${WORKDIR}/userdata.raw"
+    DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+    vgchange -ay droidian 2>/dev/null || true
+    sleep 3
+    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+    if [ -z "${ROOTFS_VOLUME}" ]; then
+        vgscan --mknodes -v 2>/dev/null || true; sleep 3
+        ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+    fi
+    ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+    mkdir -p "${WORKDIR}/lvm"
+    mount "${ROOTFS_VOLUME}" "${WORKDIR}/lvm"
+    ROOTFS_SIZE=$(du -sm "${WORKDIR}/lvm" | awk '{print $1}')
+    dd if=/dev/zero of="${WORKDIR}/rootfs.img" bs=1M count=$((ROOTFS_SIZE + 250))
+    mkfs.ext4 -O ^metadata_csum -O ^64bit -O ^orphan_file -F "${WORKDIR}/rootfs.img"
+    mkdir -p "${WORKDIR}/mnt"
+    mount -o loop "${WORKDIR}/rootfs.img" "${WORKDIR}/mnt"
+    rsync --archive -H -A -X "${WORKDIR}/lvm/" "${WORKDIR}/mnt/"
+    sync
+    umount "${WORKDIR}/mnt"
+    umount "${WORKDIR}/lvm"
+    vgchange -an droidian 2>/dev/null || true
+    losetup -d "${DEVICE}"
+fi
+
 # Build recovery zip from recovery template
 TEMPLATE="${REPO_ROOT}/android-recovery-flashing-template"
 mkdir -p "${WORKDIR}/recovery/data"
 cp "${TEMPLATE}/tools/busybox" "${WORKDIR}/recovery/tools/"
+mkdir -p "${WORKDIR}/recovery/META-INF/com/google/android"
 cp "${TEMPLATE}/META-INF/com/google/android/update-binary" "${WORKDIR}/recovery/META-INF/com/google/android/"
 cp "${TEMPLATE}/META-INF/com/google/android/updater-script" "${WORKDIR}/recovery/META-INF/com/google/android/"
-[ -f "${TEMPLATE}/setup.sh" ] && cp "${TEMPLATE}/setup.sh" "${WORKDIR}/recovery/setup.sh"
+cp "${TEMPLATE}/setup.sh" "${WORKDIR}/recovery/setup.sh"
 
-# Use overlay setup.sh if present
+# Use overlay setup.sh if present (flashes boot/dtbo/vbmeta from /data/ directly)
 OVERLAY="${REPO_ROOT}/android-recovery-overlay/setup.sh"
 [ -f "${OVERLAY}" ] && cp "${OVERLAY}" "${WORKDIR}/recovery/setup.sh"
 
-# Add rootfs.img and all images to data/
+# Add all images to data/
 cp "${WORKDIR}/rootfs.img" "${WORKDIR}/recovery/data/"
 for img in vendor.img odm.img; do
     [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/recovery/data/"
@@ -168,6 +149,51 @@ done
 # Zip recovery
 echo "Creating recovery zip..."
 (cd "${WORKDIR}/recovery" && zip -r9 "${RECOVERY_ZIP}" . -x ".git" "README.md" "*placeholder")
+
+# === FASTBOOT ZIP: inject vendor/odm into LVM ===
+echo ""
+echo "=== Updating fastboot zip ==="
+python3 -c "
+import zipfile
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
+    z.extract('data/userdata.img', '${WORKDIR}')
+"
+simg2img "${WORKDIR}/data/userdata.img" "${WORKDIR}/userdata.raw"
+DEVICE=$(losetup -f --show "${WORKDIR}/userdata.raw")
+vgchange -ay droidian 2>/dev/null || true
+sleep 3
+ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+if [ -z "${ROOTFS_VOLUME}" ]; then
+    vgscan --mknodes -v 2>/dev/null || true; sleep 3
+    ROOTFS_VOLUME=$(realpath /dev/mapper/droidian-droidian--rootfs 2>/dev/null || echo "")
+fi
+ROOTFS_VOLUME=${ROOTFS_VOLUME/\/dev/\/host-dev}
+mkdir -p "${WORKDIR}/mnt2"
+mount "${ROOTFS_VOLUME}" "${WORKDIR}/mnt2"
+
+mkdir -p "${WORKDIR}/mnt2/userdata"
+for img in vendor.img odm.img; do
+    [ -f "${WORKDIR}/${img}" ] && cp "${WORKDIR}/${img}" "${WORKDIR}/mnt2/userdata/"
+done
+sync
+umount "${WORKDIR}/mnt2"
+vgchange -an droidian 2>/dev/null || true
+losetup -d "${DEVICE}"
+img2simg "${WORKDIR}/userdata.raw" "${WORKDIR}/data/userdata.img"
+
+# Replace userdata.img in fastboot zip
+python3 -c "
+import zipfile, os
+z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
+keep = [f for f in z.namelist() if not f.startswith('data/')]
+z.close()
+os.remove('${FASTBOOT_ZIP}')
+z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED)
+for fname in keep:
+    z.write(os.path.join(os.path.dirname('${FASTBOOT_ZIP}'), fname), fname)
+z.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
+z.close()
+"
 
 echo ""
 echo "========================================"
