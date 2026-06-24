@@ -111,7 +111,16 @@ losetup -d "${DEVICE}"
 echo "Converting back to sparse image"
 img2simg "${WORKDIR}/userdata.raw" "${USERDATA_IMG}"
 
-echo "Updating zip"
+echo "Updating zip with modified userdata.img"
 (cd "${WORKDIR}" && zip -r9 "${ZIP_PATH}" "data/userdata.img")
 
-echo "Partition images injected into userdata.img successfully"
+echo "Adding images to zip at data/"
+TMP=$(mktemp -d)
+mkdir "${TMP}/data"
+for img in ${IMAGES}; do
+    cp "${PART_DIR}/${img}" "${TMP}/data/"
+done
+(cd "${TMP}" && zip -r9 "${ZIP_PATH}" data/*)
+rm -rf "${TMP}"
+
+echo "Partition images injected into userdata.img and added to zip successfully"
