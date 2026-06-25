@@ -3,7 +3,7 @@ set -e
 
 ZIP_NAME="${1}"
 PART_DIR="${2:-android-partitions}"
-REMOTE_BASE="${3:-https://media.githubusercontent.com/media/thespider2/droidian-pipa-repo/refs/heads/main/packages}"
+REMOTE_BASE="${3:-https://media.githubusercontent.com/media/thespider2/droidian-images-xiaomi-pipa/refs/heads/trixie/android-partitions}"
 
 if [ -z "${ZIP_NAME}" ]; then
     echo "Usage: $0 <zip-name> [partitions-dir] [remote-base-url]"
