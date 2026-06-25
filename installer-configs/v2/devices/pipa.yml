@@ -20,7 +20,7 @@ operating_systems:
           - core:download:
               group: "firmware"
               files:
-                - url: "https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/latest/download/image-fastboot-pipa.zip"
+                - url: "https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/download/nightly/image-fastboot-pipa.zip"
       - actions:
           - core:unpack:
               group: "firmware"
