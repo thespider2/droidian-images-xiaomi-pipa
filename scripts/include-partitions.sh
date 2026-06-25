@@ -232,7 +232,7 @@ import zipfile, os
 with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as zin:
     entries = {}
     for f in zin.infolist():
-        if not f.filename.startswith('data/'):
+        if f.filename != 'data/userdata.img':
             entries[f.filename] = zin.read(f.filename)
 os.remove('${FASTBOOT_ZIP}')
 with zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED) as zout:
