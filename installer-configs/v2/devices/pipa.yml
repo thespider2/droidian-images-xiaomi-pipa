@@ -1,0 +1,56 @@
+name: "Xiaomi Pad 6"
+codename: "pipa"
+formfactor: "tablet"
+aliases: []
+doppelgangers: []
+user_actions:
+  bootloader:
+    title: "Reboot to Bootloader"
+    description: "With the device powered off, press and hold the Volume Down + Power buttons until the screen turns on. It should say 'Fastboot Mode'."
+    image: "phone_power_down"
+    button: true
+unlock: []
+operating_systems:
+  - name: "Droidian"
+    compatible_installer: ">=0.0.1"
+    options: []
+    prerequisites: []
+    steps:
+      - actions:
+          - core:download:
+              group: "firmware"
+              files:
+                - url: "https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/latest/download/image-fastboot-pipa.zip"
+      - actions:
+          - core:unpack:
+              group: "firmware"
+              files:
+                - archive: "image-fastboot-pipa.zip"
+                  dir: "unpacked_droidian"
+      - actions:
+          - adb:reboot:
+              to_state: "bootloader"
+        fallback:
+          - core:user_action:
+              action: "bootloader"
+      - actions:
+          - fastboot:flash:
+              partitions:
+                - partition: "boot"
+                  file: "unpacked_droidian/data/boot.img"
+                  group: "firmware"
+                - partition: "dtbo"
+                  file: "unpacked_droidian/data/dtbo.img"
+                  group: "firmware"
+                - partition: "vbmeta"
+                  file: "unpacked_droidian/data/vbmeta.img"
+                  group: "firmware"
+                  flags:
+                    - "--disable-verity"
+                    - "--disable-verification"
+                - partition: "userdata"
+                  file: "unpacked_droidian/data/userdata.img"
+                  group: "firmware"
+      - actions:
+          - fastboot:reboot:
+    slideshow: []
