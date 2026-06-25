@@ -1,94 +1,85 @@
-Droidian
-========
+Droidian for Xiaomi Pad 6 (pipa)
+=================================
 
-Droidian is a GNU/Linux distribution based on top of Mobian, a Debian-based distribution for mobile devices. The goal of Droidian is to be able to run Mobian on Android phones.
+This repository builds Droidian flashable images for the **Xiaomi Pad 6 (pipa)**.
 
-This repository is the canonical place to get Droidian images.
+Two image types are produced:
 
-# Which image to get?
+* **Fastboot-flashable image** — recommended. Contains `userdata.img` with LVM
+  and `vendor.img`/`odm.img` pre-loaded inside `/userdata/`.
+* **Recovery-flashable zipfile** — for recovery (TWRP) flashing. Contains the
+  rootfs as `rootfs.img` plus `vendor.img`/`odm.img` alongside it.
 
-There are two different types of images:
+# Downloads
 
-* Fastboot-flashable image
-* Recovery-flashable zipfile
+Nightly builds are available on the
+[releases page](https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/tag/nightly).
 
-Fastboot-flashable images are, instead, the recommended way to install Droidian. These images are device specific, so if you want one for your device you should create one yourself.
-Fastboot-flashable images support Full Disk Encryption, and make use of the whole userdata partition.
+# Installation (fastboot)
 
-The recovery flashable zipfile needs to be flashed via a suitable Android recovery (such as TWRP). Recovery flashable zipfiles are generic, and are useful to test drive Droidian or in early device porting stages.
-You should pick up the correct zipfile for your specific device:
+## Prerequisites
 
-* Device with an Android 9 vendor: api28
-* Device with an Android 10 vendor: api29
-* Device with an Android 11 vendor: api30
-* Device with an Android 12/12.1 vendor: api32
-* Device with an Android 12/12.1 vendor: api33
+* A PC with `fastboot` installed
+* Unlocked bootloader on the Xiaomi Pad 6
 
-If you're in doubt, and there is a fastboot-flashable image available for your device, it's recommended to use that.
+## Steps
 
-## Recovery-flashable zipfile: bundles
+1. Download the latest fastboot zip from the
+   [nightly release](https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/tag/nightly).
+   Look for `droidian-UNOFFICIAL-phosh-phone-xiaomi_pipa-api33-arm64-next_*.zip`.
+2. Extract it:
+   ```
+   unzip droidian-UNOFFICIAL-*.zip
+   cd droidian-UNOFFICIAL-*
+   ```
+3. Reboot the device to fastboot mode (Volume Down + Power).
+4. Run the flash script:
+   ```
+   sudo ./flash_all.sh
+   ```
+5. The device reboots automatically. Default passcode: `1234`.
 
-Recovery flashable zipfiles support the addition of *bundles*, which allow to add functionality directly during the flashing process.
+# Installation (recovery)
 
-Currently available bundles:
+1. Download the recovery zip (contains `_recovery` in the name).
+2. Boot TWRP or another Android recovery.
+3. From recovery, enter ADB sideload mode:
+   ```
+   adb sideload droidian-UNOFFICIAL-*_recovery.zip
+   ```
+4. Reboot. The device boots to Droidian.
 
-* Devtools: Useful development tools for porters, not available in nightlies as they're embedded in the rootfs
-* Adaptation bundle: Device specific bundle (containing kernel, device-specific settings, etc)
+# Droidian Installer
 
-**Keep in mind that is still recommended using fastboot-flashable images if available for your device.**
+This device is supported by the
+[Droidian Installer](https://github.com/droidian-releng/droidian-installer).
 
-# Fastboot-flashable image: installation instructions
-
-## Preparations
-
-If your device is A/B device, it is necessary to have both slots on same Android version.
-
-Ensure you have `fastboot` installed.
-
-## Installation
-
-Extract the downloaded archive, then run:
+To install using the local config:
 
 ```
-./flash_all.sh
+droidian-installer -f installer-configs/v2/devices/pipa.yml
 ```
 
-You might need to execute that at root depending on how your system is configured.
+The installer configs are also published to GitHub Pages at
+`https://thespider2.github.io/droidian-images-xiaomi-pipa/`.
 
-## Finalizing installation
+The fastboot zip is available at the stable URL:
+`https://github.com/thespider2/droidian-images-xiaomi-pipa/releases/download/nightly/image-fastboot-pipa.zip`
 
-The device will reboot automatically. When the device has booted, you can unlock the device with the default passcode `1234`.
+# Building locally
 
-# Recovery-flashable zipfile: installation instructions
+```
+DROIDIAN_VERSION=next ./generate_device_recipe.py xiaomi_pipa arm64 phosh phone 33 && \
+  debos --disable-fakemachine generated/droidian.yaml
+```
 
-## Preparations
+# Repository structure
 
-If your device is A/B device, it is necessary to have both slots on same Android version.
-
-Then, boot your favourite Android recovery.
-
-## Installation
-
-From recovery open adb sideload mode (under advanced on TWRP) and run following commands on your computer replacing `ARCH_YYYYMMDD` with the version of Droidian and `vendor-device` with the vendor and device codenames:
-
-* `adb sideload droidian-OFFICIAL-phosh-phone-rootfs-apiXX-ARCH-VERSION_DATE.zip`
-
-If you want to sideload devtools:
-
-* `adb sideload droidian-devtools-ARCH_YYYYMMDD.zip`
-
-If you want to sideload an adaptation bundle:
-
-* `adb sideload droidian-adapatation-vendor-device-ARCH_YYYYMMDD.zip`
-
-Note that you have to restart the sideload mode by tapping back and starting sideload again before every `adb sideload command`.
-
-## Finalizing installation
-
-Now, you have to reboot the device. It should boot to phosh (a graphical user interface used by Droidian) after rebooting once more automatically. When the device has booted, you can unlock the device with the default passcode `1234`.
-
-## Troubleshooting
-
-If the image does not boot and your userdata is not an ext4 partition, you might try formatting it. **Note that this is a destructive operation, you cannot recover files from userdata afterwards!**
-
-* `fastboot format:ext4 userdata`
+| Path | Description |
+|------|-------------|
+| `community_devices.yml` | Device definitions for fastboot + recovery builds |
+| `generate_device_recipe.py` | Generates the debos recipe from device config |
+| `scripts/include-partitions.sh` | Injects `vendor.img`/`odm.img` into both zip types |
+| `installer-configs/v2/devices/pipa.yml` | Droidian Installer device config |
+| `installer-configs/v2/devices/pipa.json` | JSON variant for direct serving |
+| `.github/workflows/release.yml` | CI: builds and publishes nightly images |
