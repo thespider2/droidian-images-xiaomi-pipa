@@ -229,15 +229,16 @@ with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as z:
 
         python3 -c "
 import zipfile, os
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'r')
-keep = [f for f in z.namelist() if not f.startswith('data/')]
-z.close()
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'r') as zin:
+    entries = {}
+    for f in zin.infolist():
+        if not f.filename.startswith('data/'):
+            entries[f.filename] = zin.read(f.filename)
 os.remove('${FASTBOOT_ZIP}')
-z = zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED)
-for fname in keep:
-    z.write(os.path.join(os.path.dirname('${FASTBOOT_ZIP}'), fname), fname)
-z.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
-z.close()
+with zipfile.ZipFile('${FASTBOOT_ZIP}', 'w', zipfile.ZIP_DEFLATED) as zout:
+    for fname, content in entries.items():
+        zout.writestr(fname, content)
+    zout.write('${WORKDIR}/data/userdata.img', 'data/userdata.img')
 "
         echo "Fastboot zip updated"
     fi
