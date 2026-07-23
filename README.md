@@ -55,7 +55,7 @@ Builds are published as separate releases:
 # Droidian Installer
 
 This device is supported by the
-[Droidian Installer](https://github.com/droidian-releng/droidian-installer).
+[Droidian Installer](https://github.com/thespider2/droidian-installer).
 
 To install using the local config:
 
