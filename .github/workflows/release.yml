@@ -15,6 +15,7 @@ jobs:
     name: Generate matrix
     outputs:
       matrix: ${{ steps.gen-matrix.outputs.matrix }}
+      versions: ${{ steps.gen-matrix.outputs.versions }}
 
     steps:
       - name: Checkout
@@ -26,6 +27,13 @@ jobs:
           JOBS="$(./generate_device_recipe.py --matrix)"
           echo "matrix=${JOBS}" >> $GITHUB_OUTPUT
 
+          if [[ "${{ github.ref }}" == refs/tags/droidian* ]]; then
+            VER="$(echo '${{ github.ref_name }}' | rev | cut -d'/' -f1 | rev)"
+            echo "versions=[\"${VER}\"]" >> $GITHUB_OUTPUT
+          else
+            echo 'versions=["current","next"]' >> $GITHUB_OUTPUT
+          fi
+
   build:
     runs-on: ubuntu-24.04-arm
     needs: once
@@ -34,8 +42,9 @@ jobs:
       fail-fast: true
       matrix:
         config: ${{ fromJson(needs.once.outputs.matrix) }}
+        droidian_version: ${{ fromJson(needs.once.outputs.versions) }}
 
-    name: ${{ matrix.config.job_name }}
+    name: ${{ matrix.config.job_name }} (${{ matrix.droidian_version }})
 
     steps:
       - name: Get current date
@@ -44,13 +53,15 @@ jobs:
       - name: Set suffix
         run: echo "release_suffix=_${{ env.current_date }}" >> $GITHUB_ENV
 
-      - name: Set nightly version
-        if: startsWith(github.ref, 'refs/tags/droidian') != true
-        run: echo "DROIDIAN_VERSION=current" >> $GITHUB_ENV
+      - name: Set Droidian version
+        run: echo "DROIDIAN_VERSION=${{ matrix.droidian_version }}" >> $GITHUB_ENV
 
-      - name: Set version
-        if: startsWith(github.ref, 'refs/tags/droidian') == true
-        run: echo "DROIDIAN_VERSION=$(echo ${{ github.ref }} | rev | cut -d'/' -f1 | rev)" >> $GITHUB_ENV
+      - name: Set builder image tag
+        run: |
+          case "${{ matrix.droidian_version }}" in
+            current|next) echo "BUILDER_TAG=${{ matrix.droidian_version }}" >> $GITHUB_ENV ;;
+            *) echo "BUILDER_TAG=current" >> $GITHUB_ENV ;;
+          esac
 
       - name: Set identifier
         run: echo "DROIDIAN_IDENTIFIER=${{ matrix.config.product }}-${{ matrix.config.arch }}-${{ matrix.config.edition }}-${{ matrix.config.variant }}-${{ matrix.config.apilevel }}" >> $GITHUB_ENV
@@ -68,10 +79,10 @@ jobs:
         run: mkdir -p /tmp/buildd-results
 
       - name: Pull container
-        run: docker pull quay.io/droidian/rootfs-builder:current-arm64
+        run: docker pull quay.io/droidian/rootfs-builder:${{ env.BUILDER_TAG }}-arm64
 
       - name: Start Container
-        run: echo CONTAINER_HASH=$(docker run --detach --privileged --cgroupns=host -v /tmp/buildd-results:/buildd/out -v /dev:/host-dev -v /sys/fs/cgroup:/sys/fs/cgroup -v ${PWD}:/buildd/sources --security-opt seccomp:unconfined quay.io/droidian/rootfs-builder:current-arm64 sleep infinity) >> $GITHUB_ENV
+        run: echo CONTAINER_HASH=$(docker run --detach --privileged --cgroupns=host -v /tmp/buildd-results:/buildd/out -v /dev:/host-dev -v /sys/fs/cgroup:/sys/fs/cgroup -v ${PWD}:/buildd/sources --security-opt seccomp:unconfined quay.io/droidian/rootfs-builder:${{ env.BUILDER_TAG }}-arm64 sleep infinity) >> $GITHUB_ENV
 
       - name: Build rootfs
         run: |
@@ -87,17 +98,19 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: droidian-out-${{ matrix.config.product }}-${{ matrix.config.arch }}-${{ matrix.config.edition }}-${{ matrix.config.variant }}-${{ matrix.config.apilevel }}
+          name: droidian-out-${{ matrix.droidian_version }}-${{ matrix.config.product }}-${{ matrix.config.arch }}-${{ matrix.config.edition }}-${{ matrix.config.variant }}-${{ matrix.config.apilevel }}
           path: out/*
           if-no-files-found: error
           retention-days: 1
 
   prepare:
     runs-on: ubuntu-latest
-    name: Create GitHub release
-    needs: build
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}${{ steps.create_nightly.outputs.upload_url }}
+    name: Create GitHub release (${{ matrix.droidian_version }})
+    needs: [once, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        droidian_version: ${{ fromJson(needs.once.outputs.versions) }}
 
     steps:
       - name: Checkout
@@ -113,85 +126,110 @@ jobs:
           large-packages: true
           swap-storage: true
 
-      - name: Nightly tag
+      - name: Set release tag
+        id: release-tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/droidian* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_stable=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ matrix.droidian_version }}" >> $GITHUB_OUTPUT
+            echo "is_stable=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Recreate version tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        if: startsWith(github.ref, 'refs/tags/droidian') != true
+        if: steps.release-tag.outputs.is_stable != 'true'
         run: |
-          gh release delete nightly --yes || true
-          git push --delete origin refs/tags/nightly || true
-          gh release create nightly
+          TAG="${{ steps.release-tag.outputs.tag }}"
+          gh release delete "${TAG}" --yes || true
+          git push --delete origin "refs/tags/${TAG}" || true
+          # Drop legacy nightly tag once while migrating
+          if [ "${TAG}" = "current" ]; then
+            gh release delete nightly --yes || true
+            git push --delete origin refs/tags/nightly || true
+          fi
+          gh release create "${TAG}" --prerelease --title "${TAG}"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: droidian-out-${{ matrix.droidian_version }}-*
           path: droidian-out
+          merge-multiple: false
 
       - name: Create SHA256SUMS
         run: |
           cd droidian-out
           for x in droidian-out-*; do
-            cd $x
+            [ -d "$x" ] || continue
+            cd "$x"
             sha256sum * >> ../SHA256SUMS
             cd ..
           done
 
       - name: Create stable release (drafted)
-        id: create_release
-        if: startsWith(github.ref, 'refs/tags/droidian')
+        if: steps.release-tag.outputs.is_stable == 'true'
         uses: softprops/action-gh-release@v2.2.2
         with:
           files: droidian-out/SHA256SUMS
-          tag_name: ${{ github.ref }}
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           draft: true
           prerelease: false
 
-      - name: Create nightly release
-        id: create_nightly
-        if: startsWith(github.ref, 'refs/tags/droidian') != true
+      - name: Create version release
+        if: steps.release-tag.outputs.is_stable != 'true'
         uses: softprops/action-gh-release@v2.2.2
         with:
           files: droidian-out/SHA256SUMS
-          tag_name: nightly
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           draft: false
           prerelease: true
 
   publish:
     runs-on: ubuntu-latest
     needs: [once, prepare]
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}${{ steps.create_nightly.outputs.upload_url }}
-
     strategy:
       fail-fast: false
       matrix:
         config: ${{ fromJson(needs.once.outputs.matrix) }}
+        droidian_version: ${{ fromJson(needs.once.outputs.versions) }}
 
-    name: Publish ${{ matrix.config.job_name }}
+    name: Publish ${{ matrix.config.job_name }} (${{ matrix.droidian_version }})
 
     steps:
+      - name: Set release tag
+        id: release-tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/droidian* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_stable=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ matrix.droidian_version }}" >> $GITHUB_OUTPUT
+            echo "is_stable=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: droidian-out-${{ matrix.config.product }}-${{ matrix.config.arch }}-${{ matrix.config.edition }}-${{ matrix.config.variant }}-${{ matrix.config.apilevel }}
+          name: droidian-out-${{ matrix.droidian_version }}-${{ matrix.config.product }}-${{ matrix.config.arch }}-${{ matrix.config.edition }}-${{ matrix.config.variant }}-${{ matrix.config.apilevel }}
           path: droidian-out
 
       - name: Create stable release (drafted)
-        id: create_release
-        if: startsWith(github.ref, 'refs/tags/droidian')
+        if: steps.release-tag.outputs.is_stable == 'true'
         uses: softprops/action-gh-release@v2.2.2
         with:
           files: droidian-out/*
-          tag_name: ${{ github.ref }}
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           draft: true
           prerelease: false
 
-      - name: Create nightly release
-        id: create_nightly
-        if: startsWith(github.ref, 'refs/tags/droidian') != true
+      - name: Create version release
+        if: steps.release-tag.outputs.is_stable != 'true'
         uses: softprops/action-gh-release@v2.2.2
         with:
           files: droidian-out/*
-          tag_name: nightly
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           draft: false
           prerelease: true
